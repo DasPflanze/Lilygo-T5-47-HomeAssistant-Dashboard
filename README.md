@@ -37,3 +37,9 @@ Primary modifications are:
     - Special support for **[LILYGO T-HIGROW sensor](https://www.aliexpress.com/item/32815782900.html)** with battery level and temperature display
 - Some refactoring, bugfixing and code cleanup
 - Some minior UI changes, where I liked it different
+
+- ## Support my work ...
+**...with caffeine?**  
+
+<a href="https://www.buymeacoffee.com/cybdis" target="_blank">
+  <img src="https://raw.githubusercontent.com/CybDis/CybDis/main/bmc-yellow-button.png" height="60px"/></a>
