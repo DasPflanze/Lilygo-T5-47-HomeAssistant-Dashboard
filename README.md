@@ -38,7 +38,7 @@ Primary modifications are:
 - Some refactoring, bugfixing and code cleanup
 - Some minior UI changes, where I liked it different
 
-- ## Support my work ...
+## Support my work ...
 **...with caffeine?**  
 
 <a href="https://www.buymeacoffee.com/cybdis" target="_blank">
