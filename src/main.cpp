@@ -30,6 +30,7 @@
 #include <ArduinoJson.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
+#include "touch.h"
 
 #include "configurations.h"
 #include "homeassistantapi.h"
@@ -74,6 +75,8 @@
 
 #define BATT_PIN            36
 
+// Touch screen pins are handled by the LilyGo EPD47 library internally
+
 #define TILE_IMG_WIDTH  100
 #define TILE_IMG_HEIGHT 100
 #define TILE_WIDTH      160
@@ -90,7 +93,7 @@
 #define WATERING_SOIL_LIMIT 75
 
 // deep sleep configurations
-long SleepDuration   = 60; // Sleep time in minutes, aligned to the nearest minute boundary, so if 30 will always update at 00 or 30 past the hour
+long SleepDuration   = 1; // Sleep time in minutes, aligned to the nearest minute boundary, so if 30 will always update at 00 or 30 past the hour
 int  WakeupHour      = 6;  // Wakeup after 06:00 to save battery power
 int  SleepHour       = 23; // Sleep  after 23:00 to save battery power
 
@@ -101,6 +104,25 @@ int  CurrentHour = 0, CurrentMin = 0, CurrentSec = 0, CurrentDay = 0;
 int vref = 1100; // default battery vref
 int wifi_signal = 0;
 
+// Touch screen instance (using LilyGo EPD47 native touch)
+TouchClass touch;
+
+// Touch zones for tiles
+struct TouchZone {
+    int x, y, width, height;
+    String entityID;
+    int entityType;
+    int entityIndex;
+};
+
+TouchZone touchZones[12];
+bool touchEnabled = false;
+bool touchActive = false;  // Track if touch is currently pressed
+
+// State tracking for selective updates
+String lastEntityStates[12];
+bool entityStatesInitialized = false;
+
 // required for NTP time
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP);
@@ -110,6 +132,9 @@ String timeStamp;
 
 // defualt strings
 String str_unavail = "unavail.";
+
+// Forward declarations
+void DrawHAScreen();
 
 uint8_t StartWiFi() {
   IPAddress dns(8, 8, 8, 8); // Use Google DNS
@@ -568,7 +593,8 @@ void DisplayGeneralInfoSection()
     Serial.println("Getting haStatus...");
     HAConfigurations haConfigs = getHaStatus();
     Serial.println("drawing status line...");    
-    drawString(EPD_WIDTH/2, 18, dateStamp + " - " +  timeStamp + " (HA Ver:" + haConfigs.version + "/" + haConfigs.haStatus + ", TZ:" + haConfigs.timeZone + ")", CENTER);
+    drawString(EPD_WIDTH/2, 18, dateStamp + " - " +  timeStamp, CENTER);
+    //drawString(EPD_WIDTH/2, 18, dateStamp + " - " +  timeStamp + " (HA Ver:" + haConfigs.version + "/" + haConfigs.haStatus + ", TZ:" + haConfigs.timeZone + ")", CENTER);
 }
 
 void DisplayStatusSection() {
@@ -584,10 +610,223 @@ void DrawWifiErrorScreen()
     epd_update();
 }
 
+void setupTouchZones() {
+    int x = 3;
+    int y = 23;
+    int index = 0;
+
+    for (int i = 0; i < sizeof(haEntities) / sizeof(haEntities[0]); i++) {
+        if (haEntities[i].entityName != "" && index < 12) {
+            touchZones[index] = {
+                x, y,
+                TILE_WIDTH - TILE_GAP,
+                TILE_HEIGHT - TILE_GAP,
+                haEntities[i].entityID,
+                haEntities[i].entityType,
+                i
+            };
+            index++;
+        }
+
+        x += TILE_WIDTH;
+        if (i == 5) {
+            x = 3;
+            y += TILE_HEIGHT;
+        }
+    }
+    Serial.println("Touch zones configured for " + String(index) + " tiles");
+}
+
+bool isPointInZone(int px, int py, TouchZone zone) {
+    return (px >= zone.x && px <= zone.x + zone.width &&
+            py >= zone.y && py <= zone.y + zone.height);
+}
+
+void toggleHomeAssistantEntity(String entityID, int entityType) {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("No WiFi connection for HA API call");
+        return;
+    }
+
+    HTTPClient http;
+    String service = "";
+
+    switch (entityType) {
+        case SWITCH:
+        case PLUG:
+            service = "switch/toggle";
+            break;
+        case LIGHT:
+            service = "light/toggle";
+            break;
+        case FAN:
+        case EXFAN:
+        case AIRPURIFIER:
+            service = "fan/toggle";
+            break;
+        case WATERHEATER:
+        case AIRCONDITIONER:
+            service = "switch/toggle";
+            break;
+        default:
+            Serial.println("Entity type not toggleable: " + String(entityType));
+            return;
+    }
+
+    http.begin(ha_server + "/api/services/" + service);
+    http.addHeader("Authorization", "Bearer " + ha_token);
+    http.addHeader("Content-Type", "application/json");
+
+    String payload = "{\"entity_id\":\"" + entityID + "\"}";
+    int httpCode = http.POST(payload);
+
+    Serial.println("HA API call: " + service + " -> " + entityID + " (Response: " + String(httpCode) + ")");
+
+    if (httpCode == 200 || httpCode == 201) {
+        Serial.println("Entity toggled successfully");
+    } else {
+        Serial.println("API call failed with code: " + String(httpCode));
+    }
+
+    http.end();
+}
+
+void showTouchFeedback(int x, int y) {
+    Serial.println("Touch feedback at: " + String(x) + ", " + String(y));
+    // Visual feedback durch kurzes Invertieren der Tile
+    drawRect(x-2, y-2, TILE_WIDTH+2, TILE_HEIGHT+2, Black);
+    epd_update();
+    delay(200);
+}
+
+void handleTouch() {
+    if (!touchEnabled) {
+        return;
+    }
+
+    if (touch.scanPoint()) {
+        // Nur verarbeiten wenn Touch vorher NICHT aktiv war (neuer Touch-Start)
+        if (touchActive) {
+            // Touch ist noch vom letzten Mal aktiv, ignorieren
+            return;
+        }
+
+        touchActive = true;  // Touch ist jetzt aktiv
+
+        uint16_t x, y;
+        touch.getPoint(x, y, 0);
+
+        // Touch-Koordinaten korrigieren (vertikal spiegeln)
+        y = EPD_HEIGHT - y;
+
+        Serial.println("NEW Touch detected at: " + String(x) + ", " + String(y) + " (corrected)");
+
+        Serial.println("Touch detected - refreshing screen");
+
+        for (int i = 0; i < 12; i++) {
+            if (touchZones[i].entityID != "" && isPointInZone(x, y, touchZones[i])) {
+                Serial.println("Touch zone hit: " + touchZones[i].entityID);
+
+                showTouchFeedback(touchZones[i].x, touchZones[i].y);
+                toggleHomeAssistantEntity(touchZones[i].entityID, touchZones[i].entityType);
+
+                // Display nach Toggle aktualisieren
+                Serial.println("Updating display after toggle");
+                delay(500);
+                //DrawHAScreen();
+                break;
+            }
+        }
+    } else {
+        // Kein Touch mehr erkannt - Touch als inaktiv markieren
+        if (touchActive) {
+            touchActive = false;
+            Serial.println("Touch released");
+        }
+    }
+
+    delay(200); // Debounce
+}
+
+void scanI2C() {
+    Serial.println("Scanning I2C bus...");
+
+    int deviceCount = 0;
+    for (byte i = 8; i < 120; i++) {
+        Wire.beginTransmission(i);
+        if (Wire.endTransmission() == 0) {
+            Serial.println("I2C device found at 0x" + String(i, HEX));
+            deviceCount++;
+        }
+    }
+
+    if (deviceCount == 0) {
+        Serial.println("No I2C devices found");
+    } else {
+        Serial.println("Found " + String(deviceCount) + " I2C devices");
+    }
+}
+
+void updateSingleTile(int tileIndex) {
+    if (tileIndex < 0 || tileIndex >= 12) return;
+
+    int x = 3 + (tileIndex % 6) * TILE_WIDTH;
+    int y = 23 + (tileIndex / 6) * TILE_HEIGHT;
+
+    // Clear tile area
+    int tile_width = TILE_WIDTH - TILE_GAP;
+    int tile_height = TILE_HEIGHT - TILE_GAP;
+    fillRect(x, y, tile_width, tile_height, White);
+
+    // Redraw tile
+    if (haEntities[tileIndex].entityType == HIGROW) {
+        String soilVal = getSensorValue(haEntities[tileIndex].entityID+"_soil");
+        String tempVal = String(getSensorFloatValue(haEntities[tileIndex].entityID+"_temperature"), 1);
+        String battVal = getSensorValue(haEntities[tileIndex].entityID+"_battery");
+        DrawTileHigrow(x, y, 0, haEntities[tileIndex].entityType, haEntities[tileIndex].entityName, soilVal, tempVal, battVal);
+    } else {
+        DrawTile(x, y, checkOnOffState(haEntities[tileIndex].entityID), haEntities[tileIndex].entityType, haEntities[tileIndex].entityName, "");
+    }
+
+    // Partial update only this tile area
+    epd_update();
+    Serial.println("Updated tile " + String(tileIndex) + ": " + haEntities[tileIndex].entityName);
+}
+
+void checkAndUpdateChangedTiles() {
+    bool anyChanges = false;
+
+    for (int i = 0; i < 12; i++) {
+        if (haEntities[i].entityName == "") continue;
+
+        String currentState;
+        if (haEntities[i].entityType == HIGROW) {
+            currentState = getSensorValue(haEntities[i].entityID+"_soil") + "|" +
+                          getSensorValue(haEntities[i].entityID+"_battery");
+        } else {
+            currentState = String(checkOnOffState(haEntities[i].entityID));
+        }
+
+        if (!entityStatesInitialized || lastEntityStates[i] != currentState) {
+            Serial.println("State change detected for " + haEntities[i].entityName + ": " +
+                          lastEntityStates[i] + " -> " + currentState);
+            lastEntityStates[i] = currentState;
+            updateSingleTile(i);
+            anyChanges = true;
+        }
+    }
+
+    if (!anyChanges && entityStatesInitialized) {
+        Serial.println("No state changes detected");
+    }
+
+    entityStatesInitialized = true;
+}
+
 void DrawHAScreen()
 {
     epd_clear();
-    
+
     DisplayStatusSection();
     DisplayGeneralInfoSection();
     Serial.println("Drawing (large icon) switchBar...");
@@ -598,6 +837,10 @@ void DrawHAScreen()
     DrawBottomBar();
 
     epd_update();
+
+    // Initialize state tracking after full screen draw
+    entityStatesInitialized = false;
+    checkAndUpdateChangedTiles();
 }
 
 void InitialiseSystem() {
@@ -611,6 +854,43 @@ void InitialiseSystem() {
   memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
 
   setFont(OpenSans9B);
+
+  // Initialize touch screen (LilyGo EPD47 native)
+  Serial.println("Initializing touch screen...");
+
+  // Initialize I2C with correct pins for LilyGo T5 4.7"
+  // INT=IO13 (Pin 16), SCL=IO14 (Pin 13), SDA=IO15 (Pin 23)
+  Wire.begin(15, 14); // SDA=IO15, SCL=IO14
+  delay(100);
+  Serial.println("I2C initialized: SDA=15, SCL=14");
+
+  scanI2C();
+
+  if (touch.begin()) {
+    touchEnabled = true;
+    Serial.println("Touch screen initialized successfully");
+    setupTouchZones();
+  } else {
+    Serial.println("Touch screen initialization failed - trying different addresses");
+
+    // Try different I2C addresses (0x5A is default, try 0x5D, 0x14, 0x38)
+    if (touch.begin(Wire, 0x5D)) {
+      touchEnabled = true;
+      Serial.println("Touch screen initialized at address 0x5D");
+      setupTouchZones();
+    } else if (touch.begin(Wire, 0x14)) {
+      touchEnabled = true;
+      Serial.println("Touch screen initialized at address 0x14");
+      setupTouchZones();
+    } else if (touch.begin(Wire, 0x38)) {
+      touchEnabled = true;
+      Serial.println("Touch screen initialized at address 0x38");
+      setupTouchZones();
+    } else {
+      touchEnabled = false;
+      Serial.println("Touch screen initialization failed completely - running without touch");
+    }
+  }
 }
 
 void BeginSleep() {
@@ -641,10 +921,40 @@ void setup() {
   else {
     DrawWifiErrorScreen();
   }
-  BeginSleep();
+  // BeginSleep(); // Deactivated for testing
 }
 
-void loop() {    
-  // nothing to do here
+void loop() {
+  // Deep sleep disabled for testing - handle touch continuously
+  static unsigned long lastSerial = 0;
+  static unsigned long lastTileCheck = 0;
+  static int loopCount = 0;
+
+  if (touchEnabled) {
+    handleTouch();
+  }
+
+  loopCount++;
+
+  // Check for tile state changes every 10 seconds
+  if (millis() - lastTileCheck > 10000) {
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("Checking for Home Assistant state changes...");
+      checkAndUpdateChangedTiles();
+      lastTileCheck = millis();
+    } else {
+      Serial.println("WiFi disconnected, skipping HA state check");
+      lastTileCheck = millis();
+    }
+  }
+
+  // Debug output every 5 seconds to keep serial alive
+  if (millis() - lastSerial > 5000) {
+    int nextCheck = (10000 - (millis() - lastTileCheck)) / 1000;
+    Serial.println("Loop #" + String(loopCount) + " - Touch: " + String(touchEnabled) + ", WiFi: " + String(WiFi.status() == WL_CONNECTED ? "OK" : "FAIL") + ", Next check: " + String(nextCheck) + "s");
+    lastSerial = millis();
+  }
+
+  delay(50);
 }
 
