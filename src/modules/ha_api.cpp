@@ -1,8 +1,9 @@
 #include "ha_api.h"
 #include "../configurations.h"
-#include "homeassistantapi.h"
+#include "ha_client.h"
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <ArduinoJson.h>
 
 // State tracking for selective updates
 String lastEntityStates[12];
@@ -63,7 +64,7 @@ void toggleHomeAssistantEntity(String entityID, int entityType) {
 void checkAndUpdateChangedTiles() {
     bool anyChanges = false;
 
-    for (int i = 0; i < 12; i++) {
+    for (int i = 0; i < haEntitiesCount; i++) {
         if (haEntities[i].entityName == "") continue;
 
         String currentState;

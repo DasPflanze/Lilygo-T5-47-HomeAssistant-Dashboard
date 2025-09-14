@@ -1,8 +1,10 @@
 #include "display_ui.h"
 #include "../configurations.h"
-#include "homeassistantapi.h"
+#include "ha_client.h"
 #include "epd_drawing.h"
 #include <NTPClient.h>
+#include <driver/adc.h>
+#include "esp_adc_cal.h"
 
 // Include all icon headers
 #include "../icons/waterheateron.h"

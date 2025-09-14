@@ -2,6 +2,7 @@
 #define DEFINITIONS_H
 
 #include <Arduino.h>
+#include "epd_driver.h"
 
 // Display constants
 #define White 0xFF
@@ -66,5 +67,10 @@ struct TouchZone {
 
 // Global strings
 extern String str_unavail;
+
+// External variables that modules need access to
+extern uint8_t *framebuffer;
+extern int vref;
+extern int wifi_signal;
 
 #endif // DEFINITIONS_H

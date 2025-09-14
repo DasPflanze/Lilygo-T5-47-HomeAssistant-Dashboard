@@ -77,7 +77,7 @@ void setupTouchZones() {
     int y = 23;
     int index = 0;
 
-    for (int i = 0; i < sizeof(haEntities) / sizeof(haEntities[0]); i++) {
+    for (int i = 0; i < haEntitiesCount; i++) {
         if (haEntities[i].entityName != "" && index < 12) {
             touchZones[index] = {
                 x, y,
